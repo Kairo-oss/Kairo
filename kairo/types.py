@@ -89,3 +89,35 @@ class EmbeddingConfig:
             raise ValueError(
                 f"sparse_format must be 'coo' or 'csr', got '{self.sparse_format}'"
             )
+
+
+@dataclass(frozen=True)
+class SparseGradientResult:
+    """Immutable result of sparse gradient computation for a batch.
+
+    Attributes:
+        indices: 1D tensor of shape (num_sampled,) with sampled embedding IDs.
+        gradients: 2D tensor of shape (num_sampled, embedding_dim) with computed gradients.
+        batch_size: Number of examples in the original batch.
+    """
+
+    indices: torch.Tensor
+    gradients: torch.Tensor
+    batch_size: int
+
+
+@dataclass(frozen=True)
+class MaskUpdateResult:
+    """Immutable result of a mask topology update (prune + grow cycle).
+
+    Attributes:
+        new_mask: Updated SparseMask after pruning and regrowing.
+        num_pruned: Number of active positions removed.
+        num_grown: Number of inactive positions activated.
+        cumulative_gradient_norm: L2 norm of accumulated gradients at time of update.
+    """
+
+    new_mask: SparseMask
+    num_pruned: int
+    num_grown: int
+    cumulative_gradient_norm: float

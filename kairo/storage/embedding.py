@@ -10,6 +10,8 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from kairo.ops.sparse_embedding import cuda_ext_available, sparse_gather
+from kairo.training.sparse_rec.sparse_grad import SparseEmbeddingLookup
 from kairo.types import EmbeddingConfig, SparseMask
 
 
@@ -36,20 +38,40 @@ class SparseEmbeddingTable(nn.Module):
         else:
             self.register_buffer("_dense_mask", None)
 
-    def forward(self, ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, ids: torch.Tensor, active_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Look up embeddings for the given IDs, applying mask if present.
 
         Args:
             ids: Integer tensor of embedding IDs. Can be any shape.
+            active_ids: Optional sorted 1D tensor of sampled embedding IDs for
+                SparseRec sparse-gradient training. When provided, the backward
+                pass computes gradients only for IDs in the intersection of
+                ``ids`` and ``active_ids``.
 
         Returns:
             Tensor of shape (*ids.shape, embedding_dim) with masked positions zeroed.
         """
-        embeddings = self.weight[ids]
-
         dense_mask: torch.Tensor | None = getattr(self, "_dense_mask", None)
+
+        # SparseRec path: sparse gradients via custom autograd Function
+        if active_ids is not None:
+            return SparseEmbeddingLookup.apply(
+                self.weight, ids, active_ids, dense_mask,
+            )
+
+        # CUDA kernel path: accelerated masked gather
+        if (
+            self._mask is not None
+            and self.weight.is_cuda
+            and cuda_ext_available()
+        ):
+            return sparse_gather(self.weight, self._mask, ids)
+
+        # Default PyTorch path (backward-compatible)
+        embeddings = self.weight[ids]
         if dense_mask is not None:
-            # Gather mask rows for the requested IDs and apply element-wise
             mask_rows = dense_mask[ids]
             embeddings = embeddings * mask_rows
 
@@ -76,6 +98,21 @@ class SparseEmbeddingTable(nn.Module):
         # Copy weight data to the new instance
         new_table.weight = nn.Parameter(self.weight.data.clone())
         return new_table
+
+    @property
+    def num_embeddings(self) -> int:
+        """Size of the embedding dictionary."""
+        return self._config.num_embeddings
+
+    @property
+    def embedding_dim(self) -> int:
+        """Dimensionality of each embedding vector."""
+        return self._config.embedding_dim
+
+    @property
+    def mask(self) -> SparseMask | None:
+        """Current sparse mask, or None if dense."""
+        return self._mask
 
     @property
     def active_parameter_count(self) -> int:
